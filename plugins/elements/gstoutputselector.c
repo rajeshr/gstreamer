@@ -178,6 +178,10 @@ gst_output_selector_init (GstOutputSelector * sel)
   sel->latest_buffer = NULL;
   gst_output_selector_switch_pad_negotiation_mode (sel,
       DEFAULT_PAD_NEGOTIATION_MODE);
+
+  g_mutex_init (&sel->underrun_pads_lock);
+  g_cond_init (&sel->underrun_pad_available);
+  sel->underrun_pads = g_hash_table_new (NULL, NULL);
 }
 
 static void
@@ -315,6 +319,63 @@ forward_sticky_events (GstPad * pad, GstEvent ** event, gpointer user_data)
   return TRUE;
 }
 
+static void
+gst_output_selector_auto_switch (GstOutputSelector * osel)
+{
+  GHashTableIter i;
+  gpointer srcpad = NULL;
+
+  g_mutex_lock (&osel->underrun_pads_lock);
+  while (!srcpad) {
+    g_hash_table_iter_init (&i, osel->underrun_pads);
+    if (g_hash_table_iter_next (&i, &srcpad, NULL))
+      g_hash_table_iter_remove (&i);
+    else
+      g_cond_wait (&osel->underrun_pad_available, &osel->underrun_pads_lock);
+  }
+  g_mutex_unlock (&osel->underrun_pads_lock);
+
+  GST_OBJECT_LOCK (GST_OBJECT (osel));
+  osel->pending_srcpad = gst_object_ref (srcpad);
+  GST_OBJECT_UNLOCK (GST_OBJECT (osel));
+}
+
+static void
+gst_output_selector_underrun (GstElement * element, GstPad * srcpad)
+{
+  GstOutputSelector *osel;
+
+  osel = GST_OUTPUT_SELECTOR (gst_pad_get_parent_element (srcpad));
+
+  GST_INFO_OBJECT (osel, "UUUUU on pad %" GST_PTR_FORMAT, srcpad);
+
+  g_mutex_lock (&osel->underrun_pads_lock);
+  g_hash_table_add (osel->underrun_pads, srcpad);
+  g_cond_signal (&osel->underrun_pad_available);
+  g_mutex_unlock (&osel->underrun_pads_lock);
+}
+
+static GstPadLinkReturn
+gst_output_selector_link (GstPad * pad, GstObject * parent, GstPad * peer)
+{
+  GstOutputSelector *osel;
+  GstElement *peerelement;
+  gulong handlerid;
+
+  osel = GST_OUTPUT_SELECTOR (parent);
+
+  GST_DEBUG_OBJECT (osel, "linking pad");
+
+  peerelement = gst_pad_get_parent_element (peer);
+
+  handlerid = g_signal_connect (peerelement, "underrun",
+      G_CALLBACK (gst_output_selector_underrun), pad);
+
+  GST_DEBUG_OBJECT (osel, "underrun signal handler id: %lu", handlerid);
+
+  return GST_PAD_LINK_OK;
+}
+
 static GstPad *
 gst_output_selector_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps)
@@ -338,6 +399,9 @@ gst_output_selector_request_new_pad (GstElement * element,
   gst_pad_sticky_events_foreach (osel->sinkpad, forward_sticky_events, srcpad);
 
   gst_element_add_pad (GST_ELEMENT (osel), srcpad);
+
+  gst_pad_set_link_function (srcpad,
+      GST_DEBUG_FUNCPTR (gst_output_selector_link));
 
   /* Set the first requested src pad as active by default */
   if (osel->active_srcpad == NULL) {
@@ -427,6 +491,10 @@ gst_output_selector_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
   GstClockTime position, duration;
 
   osel = GST_OUTPUT_SELECTOR (parent);
+
+  if (osel->underrun_pads) {
+    gst_output_selector_auto_switch (osel);
+  }
 
   /*
    * The _switch function might push a buffer if 'resend-latest' is true.

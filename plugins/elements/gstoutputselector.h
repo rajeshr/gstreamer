@@ -55,6 +55,10 @@ struct _GstOutputSelector {
   gboolean resend_latest;
   GstBuffer *latest_buffer;
 
+  GMutex underrun_pads_lock;
+  GCond underrun_pad_available;
+  GHashTable *underrun_pads;
+
 };
 
 struct _GstOutputSelectorClass {
