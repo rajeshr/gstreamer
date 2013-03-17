@@ -177,6 +177,13 @@ gst_funnel_init (GstFunnel * funnel)
   gst_pad_set_event_function (funnel->srcpad, gst_funnel_src_event);
   gst_pad_use_fixed_caps (funnel->srcpad);
   gst_element_add_pad (GST_ELEMENT (funnel), funnel->srcpad);
+
+  funnel->sync = TRUE;
+  funnel->sync_next_offset = 0;
+  funnel->sync_max_buffers = 200;
+  g_mutex_init (&funnel->sync_buffers_lock);
+  funnel->sync_buffers = NULL;
+  funnel->sync_buffers_length = 0;
 }
 
 static GstPad *
@@ -252,6 +259,12 @@ gst_funnel_release_pad (GstElement * element, GstPad * pad)
       GST_WARNING_OBJECT (funnel, "Failure pushing EOS");
 }
 
+static gint
+buffer_offset_compare (GstBuffer * a, GstBuffer * b)
+{
+  return GST_BUFFER_OFFSET (a) - GST_BUFFER_OFFSET (b);
+}
+
 static GstFlowReturn
 gst_funnel_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 {
@@ -319,7 +332,42 @@ gst_funnel_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   }
 #endif
 
-  res = gst_pad_push (funnel->srcpad, buffer);
+  g_mutex_lock (&funnel->sync_buffers_lock);
+  if (funnel->sync && GST_BUFFER_OFFSET_IS_VALID (buffer) &&
+      GST_BUFFER_OFFSET (buffer) > funnel->sync_next_offset) {
+    /* FIXME: handle insert failure */
+    funnel->sync_buffers = g_slist_insert_sorted (funnel->sync_buffers, buffer,
+        (GCompareFunc) buffer_offset_compare);
+    ++funnel->sync_buffers_length;
+    GST_DEBUG_OBJECT (funnel,
+        "stashed buffer with offset %ld, sync_buffers_length %d",
+        GST_BUFFER_OFFSET (buffer), funnel->sync_buffers_length);
+    res = GST_FLOW_OK;
+  } else {
+    GST_DEBUG_OBJECT (funnel, "sending buffer with offset %ld",
+        GST_BUFFER_OFFSET (buffer));
+    res = gst_pad_push (funnel->srcpad, buffer);
+    /* FIXME: check offset end */
+    funnel->sync_next_offset = GST_BUFFER_OFFSET (buffer) + 1;
+  }
+
+  if (funnel->sync_buffers) {
+    GstBuffer *stashed_buffer = GST_BUFFER (funnel->sync_buffers->data);
+    while (funnel->sync_next_offset == GST_BUFFER_OFFSET (stashed_buffer)) {
+      GST_DEBUG_OBJECT (funnel, "sending stashed buffer with offset %ld",
+          GST_BUFFER_OFFSET (stashed_buffer));
+      /* FIXME: handle push failure */
+      res = gst_pad_push (funnel->srcpad, stashed_buffer);
+      funnel->sync_next_offset = GST_BUFFER_OFFSET (stashed_buffer) + 1;
+      funnel->sync_buffers =
+          g_slist_remove (funnel->sync_buffers, stashed_buffer);
+      --funnel->sync_buffers_length;
+      if (!funnel->sync_buffers)
+        break;
+      stashed_buffer = GST_BUFFER (funnel->sync_buffers->data);
+    }
+  }
+  g_mutex_unlock (&funnel->sync_buffers_lock);
 
   GST_LOG_OBJECT (funnel, "handled buffer %s", gst_flow_get_name (res));
 

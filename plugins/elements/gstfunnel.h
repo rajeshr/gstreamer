@@ -56,6 +56,13 @@ struct _GstFunnel {
   GstPad         *srcpad;
 
   gboolean has_segment;
+
+  gboolean       sync;
+  guint64        sync_next_offset;
+  guint          sync_max_buffers;
+  GMutex         sync_buffers_lock;
+  GSList*        sync_buffers;
+  guint          sync_buffers_length;
 };
 
 struct _GstFunnelClass {
