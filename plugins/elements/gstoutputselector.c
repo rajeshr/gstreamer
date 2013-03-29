@@ -165,7 +165,7 @@ gst_output_selector_init (GstOutputSelector * sel)
       GST_DEBUG_FUNCPTR (gst_output_selector_event));
   gst_pad_set_query_function (sel->sinkpad,
       GST_DEBUG_FUNCPTR (gst_output_selector_query));
-
+  GST_PAD_SET_PROXY_CAPS (sel->sinkpad);
   gst_element_add_pad (GST_ELEMENT (sel), sel->sinkpad);
 
   /* srcpad management */
@@ -397,6 +397,8 @@ gst_output_selector_request_new_pad (GstElement * element,
 
   /* Forward sticky events to the new srcpad */
   gst_pad_sticky_events_foreach (osel->sinkpad, forward_sticky_events, srcpad);
+
+  GST_PAD_SET_PROXY_CAPS (srcpad);
 
   gst_element_add_pad (GST_ELEMENT (osel), srcpad);
 
